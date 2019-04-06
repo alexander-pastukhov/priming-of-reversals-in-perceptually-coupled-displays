@@ -3,7 +3,7 @@ title: "Priming of reversals and stability in perceptually coupled multistable d
 author: "Alexander (Sasha) Pastukhov"
 date: "20 March 2018"
 output:
-  github_document:
+  word_document:
     toc: yes
     toc_depth: '3'
   html_document:
@@ -12,26 +12,31 @@ output:
     theme: united
     toc: yes
     toc_depth: 3
+  github_document:
+    toc: yes
+    toc_depth: '3'
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	include = TRUE
+)
 
-rm(list= ls())
-
+library("boot")
+library("extrafont")
 library('knitr')
-library('readr')
-library('dplyr')
-library('forcats')
-library('ggplot2')
+library('tidyverse')
 library('lme4')
 library('lmerTest')
 library('BayesFactor')
-library('stringr')
 library('MuMIn')
+library("predictmeans")
 library('binom')
-library('tibble')
 library('car')
+
+loadfonts()
 ```
 
 This document contains the entire analysis code to generate descriptive statistics and figures for the manuscript.
@@ -41,6 +46,7 @@ This document contains the entire analysis code to generate descriptive statisti
 First, we merge files of individual observers into a single table
 
 ```{r Merging data, message=FALSE}
+rm(list= ls())
 
 reports <- tibble(filename= list.files(path='Data', pattern= 'csv$')) %>%
   rowwise() %>%
@@ -84,6 +90,51 @@ reports <- reports %>%
 # Probability of the report given the exogenous trigger type, the spatial layout, and timing of the switch
 This generates _Figure X_ and the associated _Table X_. 
 
+
+```{r Function to bootstrap CI for group means}
+#' Computes variable mean and 95% bootstrapped bca CI 
+#'
+#' @param data data table
+#' @param variableOfInterest name of the column to analyze
+#' @param seed seed for the random numbers generator (to make CIs reproducable). NULL means no seeding
+#' @param avgFun function used for computing average value, defaults to 'mean'
+#' @param R number of bootstrap iterations, defaults to 2000
+#'
+#' @return table with columns bcaLower, meanValue, bcaUpper
+getvariableCI <- function(data, R= 2000){
+  sampled_mean <- function(data, index){
+    return(mean(data[index]))
+  }
+  
+  # sample mean
+  sampledMean <- boot(data= data$report_proportion,
+                      statistic = sampled_mean,
+                      R= R)
+  
+  # compute CIs
+  sampledCI <- boot.ci(sampledMean, type= 'bca')
+
+  # package for output
+  data.frame(bcaLower= sampledCI$bca[4], meanValue= mean(data$report_proportion), bcaUpper= sampledCI$bca[5])
+}
+```
+
+
+```{r plotting theme}
+plot_theme <- 
+  theme(text=element_text(family="Arial"), 
+        axis.text.x = element_text(size = 8, colour = 'black'), 
+        axis.text.y = element_text(size = 8, colour = 'black'), 
+        axis.title.x = element_text(size = 10), 
+        axis.title.y = element_text(size = 10), 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.minor.x = element_blank(), 
+        panel.grid.major.y =  element_line(size = 0.24), 
+        panel.grid.minor.y =  element_line(size = 0.24), 
+        axis.ticks = element_line(size = 0.24))
+                    
+```
+
 First, we plot group averages grouped by the _response type_. However, the proportion is computed relative to the _trigger type_ and, therefore, values with each plot do not add up to 1. Rather, values for the same _trigger type_ across all plots add up to 1.
 
 ```{r Report probability plot}
@@ -102,26 +153,29 @@ observer_average_report <- reports %>%
     dplyr::mutate(report_proportion= response_count/sum(response_count)) %>%
     dplyr::ungroup()
 
+
+set.seed(711467)
+
 group_average_report <- observer_average_report %>%
     # then, at the group level
     dplyr::group_by(Layout, Trigger, ResponseMerged) %>%
-    dplyr::summarize(Preport= mean(report_proportion),
-                     SERRreport= sd(report_proportion)/sqrt(n()-1))
-    
+    dplyr::do(getvariableCI(.))
+
 ggplot(data= group_average_report,
-       aes(x= Layout, y= Preport, ymin= Preport-SERRreport, ymax= Preport+SERRreport,
-           color= Trigger, fill= Trigger, linetype= Trigger,
-           shape= Trigger, group= Trigger))+
+       aes(x= Layout, y= meanValue, ymin= bcaLower,  ymax= bcaUpper,
+           color= ResponseMerged, fill= ResponseMerged, linetype= ResponseMerged,
+           shape= ResponseMerged, group= ResponseMerged))+
   geom_line() +
   geom_point(size=3) +
   geom_errorbar(width=0.1, linetype= 'solid') +
   xlab('Layout') +
   ylab('P(report | layout, exogenous trigger)')+
-  # theme(legend.position='none') +
-  facet_grid(. ~ ResponseMerged)+
-  scale_shape_manual(values=c(21, 22, 23))
+  theme(legend.position='none') +
+  facet_grid(. ~ Trigger)+
+  scale_shape_manual(values=c(21, 22, 23)) + 
+  plot_theme
 
-# ggsave('Trigger type and layout.pdf', width= 20, height= 12, units = 'cm', useDingbats= FALSE)
+ggsave('Trigger type and layout.pdf', width= 14, height= 8, units = 'cm', useDingbats= FALSE)
 ```
 
 Next we analyze how the spatial layout and the type of the exogenous trigger (single or double) alters the probability of **each** report. Please note that we are **excluding** unperturbed trials from the analysis as our focus is on single/double trigger difference.
@@ -160,78 +214,91 @@ effect_on_reports <- function(observer_reports, response_type, matching_trigger)
   `+ layout` <- update(`+ trigger time`, .~. + Gap)
   `+ trigger type` <- update(`+ layout`, .~. + Trigger)
   `+ type x layout` <- update(`+ trigger type`, .~. + Trigger*Gap)
-  lmANOVA <- anova(`null model`, `+ trigger time`, `+ layout`, `+ trigger type`, `+ type x layout`)
+  anova_table <- anova(`null model`, `+ trigger time`, `+ layout`, `+ trigger type`, `+ type x layout`)
+  models <- list(`null model`, `+ trigger time`, `+ layout`, `+ trigger type`, `+ type x layout`)
   
-  # computing effect size for each model
-  effect_size= t(sapply(list(`null model`, `+ trigger time`, `+ layout`, `+ trigger type`, `+ type x layout`), r.squaredGLMM))
-  colnames(effect_size) <- c('Rm2', 'Rc2')
-  lmANOVA <- cbind(data.frame(model= rownames(lmANOVA)), lmANOVA, effect_size)
+  # Permutation ANOVA + Effect size
+  anova_table$`p-perm` <- NA
+  anova_table$R2m <- NA
+  anova_table$R2c <- NA
+  for(imodel1 in seq(2, length(models))){
+    # current_pair <- permlmer(models[[imodel1-1]], models[[imodel1]], perms = 9999)
+    # anova_table$`p-perm`[imodel1] <- current_pair$`Perm-p`[2]
 
-  # performing Bayesian ANOVA 
-   bfANOVA <- extractBF(selected_reports %>%
+
+    effect_size <- data.frame(r.squaredGLMM(models[[imodel1]]))
+    anova_table$R2m[imodel1] <- effect_size$R2m
+    anova_table$R2c[imodel1] <- effect_size$R2c
+  }
+    
+  # Bayesian ANOVA
+  bf_df <-
+    selected_reports %>%
     ungroup() %>%
-    mutate(SwitchTime= as.factor(SwitchTime), 
-           iObserver= as.factor(as.numeric(Observer))) %>%
-    anovaBF(report_logit ~ SwitchTime + Layout + Trigger +  iObserver, data= ., whichRandom = 'iObserver'))
-   
-  tested_LMM_Models <- c('SwitchTime + iObserver', 'Layout + SwitchTime + iObserver', 'Layout + Trigger + SwitchTime + iObserver', 'Layout + Trigger + Layout:Trigger + SwitchTime + iObserver')   
+    mutate(Observer = as.factor(as.numeric(as.factor(Observer))), # otherwise something breaks
+           SwitchTime = as.factor(SwitchTime),
+           Gap = as.factor(Gap),
+           Trigger = as.factor(Trigger))
   
-  bfANOVA$model <- rownames(bfANOVA)
-  bfTable<- rbind(data.frame(bf= c(1), error= 1), bfANOVA %>% filter(model %in% tested_LMM_Models) %>% select(bf, error)) %>%
-    # turning comparison into "with the previous model", as for LMM
-    mutate(bf_prev= bf/lag(bf))
+  bf_random <- lmBF(report_logit ~ Observer, data=bf_df, whichRandom = "Observer")
+  bf_time <- lmBF(report_logit ~ SwitchTime + Observer, data=bf_df, whichRandom = "Observer")
+  bf_layout <- lmBF(report_logit ~ SwitchTime + Layout + Observer, data=bf_df, whichRandom = "Observer")
+  bf_trigger <- lmBF(report_logit ~ SwitchTime + Layout + Trigger + Observer, data=bf_df, whichRandom = "Observer")
+  bf_trigger_layout <- lmBF(report_logit ~ SwitchTime + Layout + Trigger + Layout:Trigger + Observer, data=bf_df, whichRandom = "Observer")
+  bf_models <- list(bf_random, bf_time, bf_layout, bf_trigger, bf_trigger_layout)
 
-  list('ANOVA'= cbind(data.frame(Response= rep(response_type, nrow(lmANOVA))), lmANOVA, bfTable), 
-       'Layout model'= `+ layout`)
+  BFs <- rep(NA, length(bf_models))
+  for(iM in 2:length(bf_models)){
+    BFs[iM] <- extractBF(bf_models[[iM]])$bf[1] /  extractBF(bf_models[[iM-1]])$bf[1]
+  }
+  anova_table$bf <- BFs
+  list(anova_table, `+ layout`)
 }
 ```
 
-First, we used linear mixed models for each type of the response and apply multiple comparisons correction, before reporting them.
+We use linear mixed models for each type of the response.
+
+Effect on **both stable** response
 
 ```{r Response LMM and BF analysis}
+set.seed(218929)
 both_stable_results <- effect_on_reports(reports, 'both stable', NULL)
+both_stable_results[[1]] %>% 
+  kable(., digits =  c(0, 0, 0, 0, 0, 1, 0, 4, 4, 2, 2, 1))
+
+summary(both_stable_results[[2]])
+```
+
+```{r Single switch}
+set.seed(306731)
 single_switch_results <- effect_on_reports(reports, 'single switch', 'single trigger')
-both_switched_results <- effect_on_reports(reports, 'both switched', 'single trigger')
+single_switch_results[[1]] %>% 
+  kable(., digits =  c(0, 0, 0, 0, 0, 1, 0, 4, 4, 2, 2, 1))
 
-all_response_results <- rbind(both_stable_results[['ANOVA']], single_switch_results[['ANOVA']], both_switched_results[['ANOVA']])
-all_response_results$p_adj <- p.adjust(all_response_results$`Pr(>Chisq)`)
-
+summary(single_switch_results[[2]])
 ```
 
-## Both spheres remained stable
-```{r Slope for both stable}
-all_response_results %>%
-  filter(Response == 'both stable') %>%
-  select(-Response) %>%
-  kable(., col.names = c('model', 'Df', 'AIC', 'BIC', 'logLik', 'deviance', '$\\chi^2$', '$\\chi^2$ df', '$p$', '$R_m^2$', '$R_c^2$', 'BF', 'BF error', 'BF(previous)', '$p_{adj}$'), 
-        digits = c(0, 0, 1, 1, 1, 1, 1, 0, 4, 2, 2, 1, 2, 1, 4))
-``` 
 
+```{r both  switched}
+set.seed(321312)
+both_switched_results <- effect_on_reports(reports, 'both switched', 'double trigger')
+both_switched_results[[1]] %>% 
+  kable(., digits =  c(0, 0, 0, 0, 0, 1, 0, 4, 4, 2, 2, 1))
 
-## Only one sphere reversed
-```{r Slope for single switch}
-all_response_results %>%
-  filter(Response == 'single switch') %>%
-  select(-Response) %>%
-  kable(., col.names = c('model', 'Df', 'AIC', 'BIC', 'logLik', 'deviance', '$\\chi^2$', '$\\chi^2$ df', '$p$', '$R_m^2$', '$R_c^2$', 'BF', 'BF error', 'BF(previous)', '$p_{adj}$'), 
-        digits = c(0, 0, 1, 1, 1, 1, 1, 0, 4, 2, 2, 1, 2, 1, 4))
-
-single_switch_Gap <- summary(single_switch_results[['Layout model']])$coefficients['Gap', ]
+summary(both_switched_results[[2]])
 ```
 
-For the `single switch` response the dependence between the response probability and the distance between objects was positive (`r single_switch_Gap['Estimate']`± `r single_switch_Gap['Std. Error']`, _t_= `r single_switch_Gap['t value']`). In other words, large distance increased the likelihood of a single object switch.
-
-## Both spheres reversed the rotation
-```{r Slope for both switched}
-all_response_results %>%
-  filter(Response == 'both switched') %>%
-  select(-Response) %>%
-  kable(., col.names = c('model', 'Df', 'AIC', 'BIC', 'logLik', 'deviance', '$\\chi^2$', '$\\chi^2$ df', '$p$', '$R_m^2$', '$R_c^2$', 'BF', 'BF error', 'BF(previous)', '$p_{adj}$'), 
-        digits = c(0, 0, 1, 1, 1, 1, 1, 0, 4, 2, 2, 1, 2, 1, 4))
-
-both_switched_Gap <- summary(both_switched_results[['Layout model']])$coefficients['Gap', ]
+```{r}
+c(both_stable_results[[1]]$`Pr(>Chisq)`, 
+  single_switch_results[[1]]$`Pr(>Chisq)`,
+  both_switched_results[[1]]$`Pr(>Chisq)`) %>%
+  # na.omit() %>%
+  p.adjust(.) %>%
+  kable(digits = c(4))
 ```
-When both objects switched, the dependence between the response and the between-objects distance was negative (`r both_switched_Gap['Estimate']`± `r both_switched_Gap['Std. Error']`, _t_= `r both_switched_Gap['t value']`). In other words, large distance increased the likelihood of a single object switch.
+
+
+
 
 
 # Effect of the previous response, a.k.a. Priming
@@ -260,17 +327,27 @@ observer_report_given_history <- reports_with_history %>%
   dplyr::mutate(report_proportion= response_count/sum(response_count)) %>%
   dplyr::ungroup()
 
+
 group_report_given_history <- observer_report_given_history %>%
     dplyr::group_by(Observer, Layout, PreviousResponse_merged) %>%
     dplyr::mutate(report_proportion= response_count/sum(response_count)) %>%
     # then, at the group level
     dplyr::group_by(Layout, PreviousResponse_merged, ResponseMerged) %>%
-    dplyr::summarize(Preport= mean(report_proportion),
-                     SERRreport= sd(report_proportion)/sqrt(n()-1)) %>%
+    dplyr::do(getvariableCI(.)) %>%
     dplyr::rename('Previous Response' = PreviousResponse_merged)
 
+# group_report_given_history <- observer_report_given_history %>%
+#     dplyr::group_by(Observer, Layout, PreviousResponse_merged) %>%
+#     dplyr::mutate(report_proportion= response_count/sum(response_count)) %>%
+#     # then, at the group level
+#     dplyr::group_by(Layout, PreviousResponse_merged, ResponseMerged) %>%
+#     dplyr::summarize(Preport= mean(report_proportion),
+#                      SERRreport= sd(report_proportion)/sqrt(n()-1)) %>%
+#     dplyr::rename('Previous Response' = PreviousResponse_merged)
+
+
 ggplot(data= group_report_given_history,
-       aes(x= Layout, y= Preport, ymin= Preport-SERRreport, ymax= Preport+SERRreport,
+       aes(x= Layout, y= meanValue, ymin= bcaLower, ymax= bcaUpper,
            color= `Previous Response`, fill= `Previous Response`, linetype= `Previous Response`,
            shape= `Previous Response`, group= `Previous Response`))+
   geom_line() +
@@ -278,17 +355,36 @@ ggplot(data= group_report_given_history,
   geom_errorbar(width=0.1, linetype= 'solid') +
   xlab('Layout') +
   ylab('P(report | layout, prior Response)')+
-  # theme(legend.position='none') +
+  theme(legend.position='none') +
   facet_grid(. ~ ResponseMerged)+
-  scale_shape_manual(values=c(21, 22, 23))
-# ggsave('Priming.pdf', width= 20, height= 12, units = 'cm', useDingbats= FALSE)
+  scale_shape_manual(values=c(21, 22, 23)) +
+  plot_theme
 
+
+
+# ggplot(data= group_report_given_history,
+#        aes(x= Layout, y= meanValue, ymin= bcaLower, ymax= bcaUpper,
+#            color= ResponseMerged, fill= ResponseMerged, linetype= ResponseMerged,
+#            shape= ResponseMerged, group= ResponseMerged))+
+#   geom_line() +
+#   geom_point(size=3) +
+#   geom_errorbar(width=0.1, linetype= 'solid') +
+#   xlab('Layout') +
+#   ylab('P(report | layout, prior Response)')+
+#   theme(legend.position='none') +
+#   facet_grid(. ~ `Previous Response`)+
+#   scale_shape_manual(values=c(21, 22, 23)) + 
+#   plot_theme
+
+ggsave('Priming.pdf', width= 14, height= 8, units = 'cm', useDingbats= FALSE)
+# ggsave('Priming.pdf', width= 20, height= 12, units = 'cm', useDingbats= FALSE)
 ```
 
 
 ```{r LMM of response based on priming and layout}
 priming_on_reports <- function(observer_reports, response_type){
-  observer_averages <- observer_reports %>%
+  observer_averages <-
+      observer_reports %>%
       # counting each type of report for all available combinations of exogenous trigger and layouts  
       dplyr::group_by(Observer, Gap, PreviousResponse_merged, ResponseMerged) %>%
       dplyr::summarize(response_count= n()) %>%
@@ -313,57 +409,92 @@ priming_on_reports <- function(observer_reports, response_type){
   # using lmerTest to compare other responses to the target one
   sorted_reports <- selected_reports %>%
     mutate(PreviousResponse_merged= fct_relevel(PreviousResponse_merged, response_type))
+  
+  `random effects` <- lme4::lmer(report_logit ~ (1|Observer), data= sorted_reports)
+  `+ layout` <- update(`random effects`, .~. + Gap)
+  `+ prior response` <- update(`+ layout`, .~. + PreviousResponse_merged)
+  anova_table <- anova(`random effects`, `+ layout`, `+ prior response`)
+  
+  models <- list(`random effects`, `+ layout`, `+ prior response`)
+  
+  # Permutation ANOVA + Effect size
+  anova_table$R2m <- NA
+  anova_table$R2c <- NA
+  for(imodel1 in seq(2, length(models))){
+    effect_size <- data.frame(r.squaredGLMM(models[[imodel1]]))
+    anova_table$R2m[imodel1] <- effect_size$R2m
+    anova_table$R2c[imodel1] <- effect_size$R2c
+  }
+    
+  # Bayesian ANOVA
+  bf_df <-
+    sorted_reports %>%
+    ungroup() %>%
+    mutate(Observer = as.factor(as.numeric(as.factor(Observer))), # otherwise something breaks
+           Layout = as.factor(Gap),
+           PreviousResponse_merged = as.factor(PreviousResponse_merged))
+  
+  bf_random <- lmBF(report_logit ~ Observer, data=bf_df, whichRandom = "Observer")
+  bf_layout <- lmBF(report_logit ~ Layout + Observer, data=bf_df, whichRandom = "Observer")
+  bf_prior_response <- lmBF(report_logit ~ PreviousResponse_merged + Layout + Observer, data=bf_df, whichRandom = "Observer")
+  bf_models <- list(bf_random, bf_layout, bf_prior_response)
+
+  BFs <- rep(NA, length(bf_models))
+  for(iM in 2:length(bf_models)){
+    BFs[iM] <- extractBF(bf_models[[iM]])$bf[1] /  extractBF(bf_models[[iM-1]])$bf[1]
+  }
+  anova_table$bf <- BFs
+  
+  
   lmTestModel <- lmerTest::lmer(report_logit ~ Gap + PreviousResponse_merged + (1|Observer), data= sorted_reports)
   
-  lmTest <- data.frame(summary(lmTestModel)$coefficients)
-  model <- rownames(lmTest)
-  model[3:4] <- levels(sorted_reports$PreviousResponse_merged)[-1]
-  lmTest <- cbind(model, data.frame(Response= rep(response_type, nrow(lmTest))), lmTest)
-  rownames(lmTest) <- NULL
 
-
-  list('lmTest'= lmTest,
-       'lmTestModel'= lmTestModel)
+    list('anova'= anova_table,
+       'lmertest'= lmTestModel)
 }
 
 # modelling each response type
+
+```
+
+```{r}
+set.seed(538798)
 both_stable_results <- priming_on_reports(reports_with_history, 'both stable')
+both_stable_results[['anova']] %>%
+  data.frame() %>%
+  kable(digits =  c(0, 0, 0, 0, 0, 1, 0, 4, 2, 2, 1))
+summary(both_stable_results[[2]])
+```
+
+
+```{r}
+set.seed(95100)
 single_switch_results <- priming_on_reports(reports_with_history, 'single switch')
+single_switch_results[["anova"]] %>%
+  data.frame() 
+%>%
+  kable(digits =  c(0, 0, 0, 0, 0, 1, 0, 4, 2, 2, 1))
+
+summary(single_switch_results[[2]])
+```
+
+```{r}
+set.seed(736405)
 both_switched_results <- priming_on_reports(reports_with_history, 'both switched')
+both_switched_results[["anova"]] %>%
+  data.frame() %>%
+  kable(digits =  c(0, 0, 0, 0, 0, 1, 0, 4, 2, 2, 1))
+summary(both_switched_results[[2]])
+```
 
+```{r Adjusting p-values for ANOVA}
 # adjusting p-values for multiple comparisons 
-all_priming_results <- rbind(both_stable_results[['lmTest']], single_switch_results[['lmTest']], both_switched_results[['lmTest']])
-all_priming_results$p_adj <- p.adjust(all_priming_results$`Pr...t..`, method = 'holm')
-
-```
-
-
-## Priming for `both stable` response
-```{r priming both stable}
-all_priming_results %>%
-  filter(Response == 'both stable') %>%
-  select(-Response) %>%
-  kable(., col.names = c('Model', 'Estimate', 'Std. Error', 'df', '$t$', '$p$', '$p_{adj}$'), 
-        digits = c(0, 4, 2, 1, 1, 4, 4))
-```
-
-## Priming for `single switch` response
-```{r priming single switch}
-all_priming_results %>%
-  filter(Response == 'single switch') %>%
-  select(-Response) %>%
-  kable(., col.names = c('Model', 'Estimate', 'Std. Error', 'df', '$t$', '$p$', '$p_{adj}$'), 
-        digits = c(0, 4, 2, 1, 1, 4, 4))
-```
-
-## Priming for `both switched` response
-```{r priming both switched}
-all_priming_results %>%
-  filter(Response == 'both switched') %>%
-  select(-Response) %>%
-  kable(. , col.names = c('Model', 'Estimate', 'Std. Error', 'df', '$t$', '$p$', '$p_{adj}$'), 
-        digits = c(0, 4, 2, 1, 1, 4, 4))
-
+c(both_stable_results[["anova"]]$`Pr(>Chisq)`, 
+  single_switch_results[["anova"]]$`Pr(>Chisq)`,
+  both_switched_results[["anova"]]$`Pr(>Chisq)`) %>%
+  na.omit() %>%
+  p.adjust(.) %>%
+  kable(digits = c(4))
 ```
 
 # Location-specificity of priming for single switch only
@@ -400,6 +531,125 @@ single_reports <- single_reports %>%
 summary(lmerTest::lmer(Plogit ~ Layout + (1|Observer), data= single_reports))$coefficients %>%
   kable(., col.names = c('Estimate', 'Std. Error', 'df', '$t$', '$p$'), 
         digits = c(4, 2, 1, 1, 4))
+
+
+t.test(single_reports$Plogit[single_reports$Layout == 'overlap'], mu = 0.5)
+t.test(single_reports$Plogit[single_reports$Layout == 'touching'], mu = 0.5)
+t.test(single_reports$Plogit[single_reports$Layout == 'gap'], mu = 0.5)
+
 ```
 
 
+```{r}
+right_sphere_switched <-
+  reports_with_history %>%
+  group_by(Observer, PreviousResponse, Layout) %>%
+  summarize(PmatchingSingleSwitch= sum(Response=='right')/n()) %>%
+  ungroup() %>%
+  data.frame() %>%
+# filling out missing combinations with zero report counts
+  tidyr::complete(Observer, PreviousResponse, Layout, fill= list(PmatchingSingleSwitch = 0)) %>%
+  # focusing on single switches
+  filter(PreviousResponse %in% c('left', 'right')) %>%
+  mutate(ResponseOnSameSide= PreviousResponse == 'right')
+
+
+left_sphere_switched <-
+  reports_with_history %>%
+  group_by(Observer, PreviousResponse, Layout) %>%
+  summarize(PmatchingSingleSwitch= sum(Response=='left')/n()) %>%
+  ungroup() %>%
+  # filling out missing combinations with zero report counts
+  tidyr::complete(Observer, PreviousResponse, Layout,
+                  fill= list(PmatchingSingleSwitch = 0)) %>% # focusing on single switches
+  filter(PreviousResponse %in% c('left', 'right')) %>%
+  mutate(ResponseOnSameSide= PreviousResponse == 'left')
+
+side_history <-
+  left_sphere_switched %>%
+  rbind(right_sphere_switched) %>%
+  group_by(Observer, Layout, ResponseOnSameSide) %>%
+  summarize(Pmatch= mean(PmatchingSingleSwitch, na.rm = TRUE), 
+            Plog = car::logit(Pmatch, adjust = 0.0025)) %>%
+  ungroup() %>%
+  mutate(Observer = as.factor(as.numeric(as.factor(Observer))), 
+         ResponseOnSameSide = as.factor(ResponseOnSameSide))
+
+group_side_history <- 
+  side_history %>%
+  group_by(Layout,  ResponseOnSameSide) %>%
+  summarise(Pmean= mean(Pmatch, na.rm= TRUE),
+            Pserr= sd(Pmatch, na.rm= TRUE)/sqrt(n()-1))
+  
+ggplot(data= group_side_history,
+  aes(x= Layout, y= Pmean, ymin= Pmean-Pserr, ymax= Pmean+Pserr,
+  color= ResponseOnSameSide, fill= ResponseOnSameSide, group= ResponseOnSameSide)) +
+  geom_errorbar()+
+  geom_line()+
+  geom_point() + 
+  scale_color_brewer(palette="Dark2") + 
+  plot_theme + 
+  theme(legend.position = "none")
+  
+
+ggsave("side-specificity.pdf", width = 6, height = 7, units = "cm", useDingbats = FALSE)
+```
+
+
+Side-specific priming: overlap
+```{r side overlap}
+overlap_lmm <-
+  side_history %>%
+  filter(Layout == "overlap") %>%
+  lmerTest::lmer(Plog ~ ResponseOnSameSide + (1|Observer), data=.) %>%
+  summary()
+
+kable(data.frame(overlap_lmm$coefficients), 
+      digits = c(1, 1, 0, 1, 4))
+
+set.seed(6589)
+side_history %>%
+  filter(Layout == "overlap") %>%
+  anovaBF(Plog ~ ResponseOnSameSide + Observer, data=., whichRandom = "Observer")
+```
+
+Side-specific priming: touch
+```{r side touch}
+touch_lmm <-
+  side_history %>%
+  filter(Layout == "touching") %>%
+  lmerTest::lmer(Plog ~ ResponseOnSameSide + (1|Observer), data=.) %>%
+  summary()
+
+kable(data.frame(touch_lmm$coefficients), 
+      digits = c(1, 1, 0, 1, 4))
+
+set.seed(545633)
+side_history %>%
+  filter(Layout == "touching") %>%
+  anovaBF(Plog ~ ResponseOnSameSide + Observer, data=., whichRandom = "Observer")
+```
+
+Side-specific priming: gap
+```{r side gap}
+gap_lmm <-
+  side_history %>%
+  filter(Layout == "gap") %>%
+  lmerTest::lmer(Plog ~ ResponseOnSameSide + (1|Observer), data=.) %>%
+  summary()
+
+kable(data.frame(gap_lmm$coefficients), 
+      digits = c(1, 1, 0, 1, 4))
+
+set.seed(208426)
+side_history %>%
+  filter(Layout == "gap") %>%
+  anovaBF(Plog ~ ResponseOnSameSide + Observer, data=., whichRandom = "Observer")
+```
+
+```{r}
+p.adjust(c(data.frame(overlap_lmm$coefficients)$Pr...t..[2],
+           data.frame(touch_lmm$coefficients)$Pr...t..[2], 
+           data.frame(gap_lmm$coefficients)$Pr...t..[2]), method="holm") %>%
+  kable(digits= c(4))
+```
